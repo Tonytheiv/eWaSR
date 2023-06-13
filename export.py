@@ -58,10 +58,13 @@ def export(args):
         model, 
         {"x" : dummy_input}, 
         f = onnx_path, 
+        export_params=True,
         opset_version=12, 
-        input_names=["image"] if "imu" not in args.architecture else ["image", "imu"],
-        output_names=["prediction", "intermediate"]
-    )
+        do_constant_folding=True,
+        input_names=["modelInput"] if "imu" not in args.architecture else ["modelInput", "imu"],
+        output_names=["modelOutput", "intermediate"],
+        dynamic_axes={'modelInput' : {0 : 'batch_size'},    # variable length axes 
+                    'modelOutput' : {0 : 'batch_size'}})
 
     # simplify the model
     model_onnx = onnx.load(onnx_path)  # load onnx model
