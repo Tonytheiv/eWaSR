@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 from torch import nn
 from torchvision.transforms import InterpolationMode
 import torchvision.transforms.functional as TF
@@ -279,6 +280,14 @@ class SpatialAttentionRefinementModule(nn.Module):
         return x * self.sigmoid(w)
 
 
+def adaptive_avg_pool2d_custom(x, output_size):
+    output_size = np.array(output_size)
+    stride_size = np.floor(np.array(x.shape[-2:]) / output_size).astype(np.int32)
+    kernel_size = np.array(x.shape[-2:]) - (output_size - 1) * stride_size
+    avg = nn.AvgPool2d(kernel_size=list(kernel_size), stride=list(stride_size))
+    x = avg(x)
+    return x
+
 class PyramidPoolAgg(nn.Module):
     def __init__(self, stride):
         super().__init__()
@@ -288,7 +297,7 @@ class PyramidPoolAgg(nn.Module):
         B, C, H, W = inputs[0].shape
         H = (H - 1) // self.stride + 1
         W = (W - 1) // self.stride + 1
-        return torch.cat([nn.functional.adaptive_avg_pool2d(inp, (H, W)) for inp in inputs], dim=1)
+        return torch.cat([adaptive_avg_pool2d_custom(inp, (H, W)) for inp in inputs], dim=1)
 
     
 class SIM(nn.Module):
