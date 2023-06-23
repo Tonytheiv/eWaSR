@@ -99,7 +99,7 @@ class HeronData(Dataset):
         Returns:
             int: The length of the dataset.
         '''
-        return len(self.data)
+        return len(self.data) * (CUTMIX_IMG_PER_IMG + 1)
     
     def __getitem__(self, idx, classes=2):
         '''
@@ -112,6 +112,7 @@ class HeronData(Dataset):
         Returns:
             tuple: A tuple containing the features and metadata of the sample.
         '''
+        idx, cutmix_number = divmod(idx, CUTMIX_IMG_PER_IMG + 1)
         frame = self.data[idx]
         img = Image.open(frame['image_path']).convert('RGB')
         with open(frame['label_path']) as f:
@@ -132,9 +133,8 @@ class HeronData(Dataset):
             Fg = torch.from_numpy(Fg).unsqueeze(0)
             img = torch.cat([img, Fg], dim=0)
 
-        # CutMix augmentation
-        for _ in range(CUTMIX_IMG_PER_IMG):
-            # Randomly choose another image
+        if cutmix_number > 0:
+            # CutMix augmentation
             rand_idx = np.random.choice(len(self.data))
             rand_frame = self.data[rand_idx]
             rand_img = Image.open(rand_frame['image_path']).convert('RGB')
@@ -176,6 +176,7 @@ class HeronData(Dataset):
         onehot_mask = np.zeros((binary_mask.shape[0], binary_mask.shape[1], classes))
         for class_idx in range(classes):
             onehot_mask[binary_mask == class_idx] = np.eye(classes)[class_idx]
+
         metadata['segmentation'] = TF.to_tensor(onehot_mask)
         metadata['label'] = binary_mask
 
@@ -186,7 +187,7 @@ if __name__ == "__main__":
 
     transform = get_augmentation_transform(albu=False)
 
-    dataset = HeronData("/home/tony/Videos/data", transform=transform, four_channel_in=True)
+    dataset = HeronData("/home/tony/Videos/data", transform=transform)
     print("Number of entries:", len(dataset))
     num_lilypads = 0
 
