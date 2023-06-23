@@ -7,6 +7,8 @@ import torchvision.transforms.functional as TF
 from torch.utils.data import Dataset
 from PIL import Image
 
+CUTMIX_IMG_PER_IMG = 10
+
 def colorconstant(rgb, alpha=0.29):
     if rgb.dtype == torch.float32:
         rgb = rgb.numpy().transpose(1, 2, 0)
@@ -111,38 +113,66 @@ class HeronData(Dataset):
             tuple: A tuple containing the features and metadata of the sample.
         '''
         frame = self.data[idx]
-
-        # Load image
         img = Image.open(frame['image_path']).convert('RGB')
-
-        # Load binary mask
         with open(frame['label_path']) as f:
             mask_dict = json.load(f)
         binary_mask = np.array(mask_dict['binary_mask'])
 
-        # Normalize and add the fourth channel if needed
         if self.transform is not None:
             res = self.transform(image=np.array(img), mask=binary_mask)
             img, binary_mask = res['image'], res['mask']
 
-        if self.four_channel_in:
-            Fg = colorconstant(np.array(img), alpha=0.29)
-            Fg = torch.from_numpy(Fg).unsqueeze(0)
-        
         if self.normalize_t is not None:
             img = self.normalize_t(img)
         else:
             img = TF.to_tensor(img)
 
-        if self.four_channel_in:      
+        if self.four_channel_in:
+            Fg = colorconstant(np.array(img), alpha=0.29)
+            Fg = torch.from_numpy(Fg).unsqueeze(0)
             img = torch.cat([img, Fg], dim=0)
+
+        # CutMix augmentation
+        for _ in range(CUTMIX_IMG_PER_IMG):
+            # Randomly choose another image
+            rand_idx = np.random.choice(len(self.data))
+            rand_frame = self.data[rand_idx]
+            rand_img = Image.open(rand_frame['image_path']).convert('RGB')
+            with open(rand_frame['label_path']) as f:
+                rand_mask_dict = json.load(f)
+            rand_binary_mask = np.array(rand_mask_dict['binary_mask'])
+
+            if self.transform is not None:
+                res = self.transform(image=np.array(rand_img), mask=rand_binary_mask)
+                rand_img, rand_binary_mask = res['image'], res['mask']
+
+            if self.normalize_t is not None:
+                rand_img = self.normalize_t(rand_img)
+            else:
+                rand_img = TF.to_tensor(rand_img)
+
+            # Do CutMix
+            lam = np.random.beta(1.0, 1.0)
+            cut_rat = np.sqrt(1. - lam)
+            h, w = img.shape[1:]
+            cut_w = int(w * cut_rat)
+            cut_h = int(h * cut_rat)
+
+            cx = np.random.randint(w)
+            cy = np.random.randint(h)
+            bbx1 = np.clip(cx - cut_w // 2, 0, w)
+            bby1 = np.clip(cy - cut_h // 2, 0, h)
+            bbx2 = np.clip(cx + cut_w // 2, 0, w)
+            bby2 = np.clip(cy + cut_h // 2, 0, h)
+
+            img[:, bbx1:bbx2, bby1:bby2] = rand_img[:, bbx1:bbx2, bby1:bby2]
+            binary_mask[bbx1:bbx2, bby1:bby2] = rand_binary_mask[bbx1:bbx2, bby1:bby2]
 
         features = {'image': img}
 
         metadata_fields = ['image_path', 'name']
         metadata = {field: frame[field] for field in metadata_fields}
 
-        # Convert binary mask to one-hot encoding
         onehot_mask = np.zeros((binary_mask.shape[0], binary_mask.shape[1], classes))
         for class_idx in range(classes):
             onehot_mask[binary_mask == class_idx] = np.eye(classes)[class_idx]
@@ -152,11 +182,11 @@ class HeronData(Dataset):
         return features, metadata
 
 if __name__ == "__main__":
-    from datasets.custom_transforms import get_augmentation_transform
+    from transforms import get_augmentation_transform
 
     transform = get_augmentation_transform(albu=False)
 
-    dataset = HeronData("/home/tony/Downloads/data", transform=transform, four_channel_in=True)
+    dataset = HeronData("/home/tony/Videos/data", transform=transform, four_channel_in=True)
     print("Number of entries:", len(dataset))
     num_lilypads = 0
 
