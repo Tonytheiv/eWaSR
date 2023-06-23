@@ -296,6 +296,9 @@ class Autolabel:
       json.dump(output_json, f)
 
   def cutMix(self, num):
+    '''
+    num is the number of cutMix images to generate
+    '''
     imgs = sorted(os.listdir(self.imgs_dir), key=lambda x: int(x.split('.')[0]))  # sort the file names
     last_file_number = int(os.path.splitext(imgs[-1])[0])
 
@@ -306,14 +309,14 @@ class Autolabel:
       img1 = cv2.cvtColor(cv2.imread(os.path.join(self.imgs_dir, img1_filename)), cv2.COLOR_BGR2RGB)
       img2 = cv2.cvtColor(cv2.imread(os.path.join(self.imgs_dir, img2_filename)), cv2.COLOR_BGR2RGB)
 
-      mask1 = self.load_mask(os.path.join(self.jsons_dir, os.path.splitext(img1_filename)[0] + '.json'))
-      mask2 = self.load_mask(os.path.join(self.jsons_dir, os.path.splitext(img2_filename)[0] + '.json'))
+      mask1 = self.loadMask(os.path.join(self.jsons_dir, os.path.splitext(img1_filename)[0] + '.json'))
+      mask2 = self.loadMask(os.path.join(self.jsons_dir, os.path.splitext(img2_filename)[0] + '.json'))
 
       lam = np.random.beta(1.0, 1.0)
       cut_rat = np.sqrt(1. - lam)
       h, w = img1.shape[0], img1.shape[1]
-      cut_w = np.int(w * cut_rat)
-      cut_h = np.int(h * cut_rat)
+      cut_w = int(w * cut_rat)
+      cut_h = int(h * cut_rat)
 
       cx = np.random.randint(w)
       cy = np.random.randint(h)
@@ -330,15 +333,76 @@ class Autolabel:
       new_json_filename = f"{new_file_number}.json"
 
       cv2.imwrite(os.path.join(self.imgs_dir, new_img_filename), cv2.cvtColor(img1, cv2.COLOR_RGB2BGR))
-      self.save_mask(os.path.join(self.jsons_dir, new_json_filename), mask1)
+      self.saveMask(os.path.join(self.jsons_dir, new_json_filename), mask1)
 
-  def load_mask(self, path):
+  def loadMask(self, path):
     with open(path, 'r') as f:
       json_data = json.load(f)
       binary_mask = np.array(json_data['binary_mask'], dtype=np.uint8)
     return binary_mask
 
-  def save_mask(self, path, mask):
+  def saveMask(self, path, mask):
+    binary_mask_dict = {
+      "image": path,
+      "binary_mask": mask.tolist(),
+      "area": int(np.sum(mask))
+    }
+
+    with open(path, 'w') as outfile:
+      json.dump(binary_mask_dict, outfile)
+
+class CutMix:
+  def __init__(self, imgs_dir, jsons_dir):
+    self.imgs_dir = imgs_dir
+    self.jsons_dir = jsons_dir
+
+  def cutMix(self, num):
+    '''
+    num is the number of cutMix images to generate
+    '''
+    imgs = sorted(os.listdir(self.imgs_dir), key=lambda x: int(x.split('.')[0]))  # sort the file names
+    last_file_number = int(os.path.splitext(imgs[-1])[0])
+
+    for i in range(num):
+      img1_filename = np.random.choice(imgs)
+      img2_filename = np.random.choice(imgs)
+
+      img1 = cv2.cvtColor(cv2.imread(os.path.join(self.imgs_dir, img1_filename)), cv2.COLOR_BGR2RGB)
+      img2 = cv2.cvtColor(cv2.imread(os.path.join(self.imgs_dir, img2_filename)), cv2.COLOR_BGR2RGB)
+
+      mask1 = self.loadMask(os.path.join(self.jsons_dir, os.path.splitext(img1_filename)[0] + '.json'))
+      mask2 = self.loadMask(os.path.join(self.jsons_dir, os.path.splitext(img2_filename)[0] + '.json'))
+
+      lam = np.random.beta(1.0, 1.0)
+      cut_rat = np.sqrt(1. - lam)
+      h, w = img1.shape[0], img1.shape[1]
+      cut_w = int(w * cut_rat)
+      cut_h = int(h * cut_rat)
+
+      cx = np.random.randint(w)
+      cy = np.random.randint(h)
+      bbx1 = np.clip(cx - cut_w // 2, 0, w)
+      bby1 = np.clip(cy - cut_h // 2, 0, h)
+      bbx2 = np.clip(cx + cut_w // 2, 0, w)
+      bby2 = np.clip(cy + cut_h // 2, 0, h)
+
+      img1[bbx1:bbx2, bby1:bby2, :] = img2[bbx1:bbx2, bby1:bby2, :]
+      mask1[bbx1:bbx2, bby1:bby2] = mask2[bbx1:bbx2, bby1:bby2]
+
+      new_file_number = last_file_number + i + 1
+      new_img_filename = f"{new_file_number}.jpg"
+      new_json_filename = f"{new_file_number}.json"
+
+      cv2.imwrite(os.path.join(self.imgs_dir, new_img_filename), cv2.cvtColor(img1, cv2.COLOR_RGB2BGR))
+      self.saveMask(os.path.join(self.jsons_dir, new_json_filename), mask1)
+
+  def loadMask(self, path):
+    with open(path, 'r') as f:
+      json_data = json.load(f)
+      binary_mask = np.array(json_data['binary_mask'], dtype=np.uint8)
+    return binary_mask
+
+  def saveMask(self, path, mask):
     binary_mask_dict = {
       "image": path,
       "binary_mask": mask.tolist(),
