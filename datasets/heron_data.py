@@ -49,8 +49,7 @@ class HeronData(Dataset):
     │   ├── ...
     where jsn1/1.json is the corresponding mask for img1/1.jpg, jsn999/888.json is the corresponding mask for img999/888.jpg, etc.
     '''
-    
-    def __init__(self, base_dir, transform=None, normalize_t=None, four_channel_in=False):
+    def __init__(self, base_dir, transform=None, normalize_t=None, four_channel_in=False, device='cuda'):
         '''
         Initialize the HeronData dataset.
         
@@ -64,11 +63,12 @@ class HeronData(Dataset):
         self.transform = transform
         self.normalize_t = normalize_t
         self.four_channel_in = four_channel_in
+        self.device = device
 
         self.data = []
         img_dirs = sorted([d for d in os.listdir(base_dir) if 'img' in d])
         jsn_dirs = sorted([d for d in os.listdir(base_dir) if 'jsn' in d])
-        # import pdb; pdb.set_trace()
+
         num_labeled_images = 0
         for img_dir, jsn_dir in zip(img_dirs, jsn_dirs):
             img_path = os.path.join(base_dir, img_dir)
@@ -76,7 +76,7 @@ class HeronData(Dataset):
             img_files = sorted(os.listdir(img_path))
 
             for img_file in img_files:
-                img_file_name = os.path.splitext(img_file)[0]  # extract filename without extension
+                img_file_name = os.path.splitext(img_file)[0]
                 jsn_file = f'{img_file_name}.json'
                 jsn_file_path = os.path.join(jsn_path, jsn_file)
 
@@ -90,17 +90,30 @@ class HeronData(Dataset):
                     self.data.append(frame)
         
         print('Number of labeled images: {}'.format(num_labeled_images))
-        
-    
+
     def __len__(self):
-        '''
-        Get the length of the dataset.
-        
-        Returns:
-            int: The length of the dataset.
-        '''
         return len(self.data) * (CUTMIX_IMG_PER_IMG + 1)
     
+    def do_cutmix(self, img, binary_mask, rand_img, rand_binary_mask):
+        # CutMix augmentation
+        lam = torch.tensor(np.random.beta(1.0, 1.0)).to(self.device)
+        cut_rat = torch.sqrt(1. - lam)
+        h, w = img.shape[1:]
+        cut_w = torch.round(w * cut_rat).type(torch.long)
+        cut_h = torch.round(h * cut_rat).type(torch.long)
+
+        cx = torch.randint(w, (1,)).to(self.device)
+        cy = torch.randint(h, (1,)).to(self.device)
+        bbx1 = torch.clamp(cx - cut_w // 2, 0, w)
+        bby1 = torch.clamp(cy - cut_h // 2, 0, h)
+        bbx2 = torch.clamp(cx + cut_w // 2, 0, w)
+        bby2 = torch.clamp(cy + cut_h // 2, 0, h)
+
+        img[:, bbx1:bbx2, bby1:bby2] = rand_img[:, bbx1:bbx2, bby1:bby2]
+        binary_mask[bbx1:bbx2, bby1:bby2] = rand_binary_mask[bbx1:bbx2, bby1:bby2]
+
+        return img, binary_mask
+
     def __getitem__(self, idx, classes=2):
         '''
         Get a sample from the dataset at the given index.
@@ -128,13 +141,15 @@ class HeronData(Dataset):
         else:
             img = TF.to_tensor(img)
 
+        img = img.to(self.device)
+        binary_mask = torch.from_numpy(binary_mask).to(self.device)
+
         if self.four_channel_in:
-            Fg = colorconstant(np.array(img), alpha=0.29)
-            Fg = torch.from_numpy(Fg).unsqueeze(0)
+            Fg = colorconstant(np.array(img.cuda()), alpha=0.29)
+            Fg = torch.from_numpy(Fg).unsqueeze(0).to(self.device)
             img = torch.cat([img, Fg], dim=0)
 
         if cutmix_number > 0:
-            # CutMix augmentation
             rand_idx = np.random.choice(len(self.data))
             rand_frame = self.data[rand_idx]
             rand_img = Image.open(rand_frame['image_path']).convert('RGB')
@@ -151,33 +166,21 @@ class HeronData(Dataset):
             else:
                 rand_img = TF.to_tensor(rand_img)
 
-            # Do CutMix
-            lam = np.random.beta(1.0, 1.0)
-            cut_rat = np.sqrt(1. - lam)
-            h, w = img.shape[1:]
-            cut_w = int(w * cut_rat)
-            cut_h = int(h * cut_rat)
+            rand_img = rand_img.to(self.device)
+            rand_binary_mask = torch.from_numpy(rand_binary_mask).to(self.device)
 
-            cx = np.random.randint(w)
-            cy = np.random.randint(h)
-            bbx1 = np.clip(cx - cut_w // 2, 0, w)
-            bby1 = np.clip(cy - cut_h // 2, 0, h)
-            bbx2 = np.clip(cx + cut_w // 2, 0, w)
-            bby2 = np.clip(cy + cut_h // 2, 0, h)
-
-            img[:, bbx1:bbx2, bby1:bby2] = rand_img[:, bbx1:bbx2, bby1:bby2]
-            binary_mask[bbx1:bbx2, bby1:bby2] = rand_binary_mask[bbx1:bbx2, bby1:bby2]
+            img, binary_mask = self.do_cutmix(img, binary_mask, rand_img, rand_binary_mask)
 
         features = {'image': img}
 
         metadata_fields = ['image_path', 'name']
         metadata = {field: frame[field] for field in metadata_fields}
 
-        onehot_mask = np.zeros((binary_mask.shape[0], binary_mask.shape[1], classes))
+        onehot_mask = torch.zeros((binary_mask.shape[0], binary_mask.shape[1], classes), device=self.device)
         for class_idx in range(classes):
-            onehot_mask[binary_mask == class_idx] = np.eye(classes)[class_idx]
+            onehot_mask[binary_mask == class_idx] = torch.eye(classes, device=self.device)[class_idx]
 
-        metadata['segmentation'] = TF.to_tensor(onehot_mask)
+        metadata['segmentation'] = onehot_mask.permute(2, 0, 1)
         metadata['label'] = binary_mask
 
         return features, metadata
@@ -205,10 +208,10 @@ if __name__ == "__main__":
         
         plt.figure()
         plt.subplot(1, 2, 1)
-        plt.imshow(img.permute(1, 2, 0))
+        plt.imshow(img.permute(1, 2, 0).cpu().numpy())
         plt.title('RGB')
         plt.subplot(1, 2, 2)
-        plt.imshow(label, cmap='gray')
+        plt.imshow(label.cpu().numpy(), cmap='gray')
         plt.title('Label')
         plt.tight_layout()
         plt.show()
