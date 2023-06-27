@@ -5,6 +5,7 @@ import torch
 
 import torchvision.transforms.functional as TF
 from torch.utils.data import Dataset
+from torchvision import transforms
 from PIL import Image
 
 CUTMIX_IMG_PER_IMG = 10
@@ -94,6 +95,27 @@ class HeronData(Dataset):
     def __len__(self):
         return len(self.data) * (CUTMIX_IMG_PER_IMG + 1)
     
+    def do_rotation(self, image, mask, angle_range=(-45, 45)):
+        """
+        Rotate the image and mask within the given angle range.
+        """
+        # convert tensors to PIL Images
+        image = TF.to_pil_image(image.cpu())
+        mask = TF.to_pil_image(mask.cpu().type(torch.uint8))
+
+        # get random rotation angle
+        angle = torch.FloatTensor(1).uniform_(angle_range[0], angle_range[1]).item()
+
+        # rotate image and mask
+        image = TF.rotate(image, angle)
+        mask = TF.rotate(mask, angle)
+
+        # convert back to tensors
+        image = TF.to_tensor(image).to(self.device)
+        mask = torch.from_numpy(np.array(mask)).to(self.device)
+
+        return image, mask
+    
     def do_cutmix(self, img, binary_mask, rand_img, rand_binary_mask):
         # CutMix augmentation
         lam = torch.tensor(np.random.beta(1.0, 1.0)).to(self.device)
@@ -113,6 +135,78 @@ class HeronData(Dataset):
         binary_mask[bbx1:bbx2, bby1:bby2] = rand_binary_mask[bbx1:bbx2, bby1:bby2]
 
         return img, binary_mask
+
+    def do_cutmix_with_rotation(self, img, binary_mask, rand_img, rand_binary_mask):
+        # CutMix augmentation
+        lam = torch.tensor(np.random.beta(1.0, 1.0)).to(self.device)
+        cut_rat = torch.sqrt(1. - lam)
+        h, w = img.shape[1:]
+        cut_w = torch.round(w * cut_rat).type(torch.long)
+        cut_h = torch.round(h * cut_rat).type(torch.long)
+
+        cx = torch.randint(w, (1,)).to(self.device)
+        cy = torch.randint(h, (1,)).to(self.device)
+        bbx1 = torch.clamp(cx - cut_w // 2, 0, w)
+        bby1 = torch.clamp(cy - cut_h // 2, 0, h)
+        bbx2 = torch.clamp(cx + cut_w // 2, 0, w)
+        bby2 = torch.clamp(cy + cut_h // 2, 0, h)
+
+        # Rotate the rand_img and the corresponding rand_binary_mask before mixing
+        rand_img, rand_binary_mask = self.do_rotation(rand_img, rand_binary_mask)
+
+        img[:, bbx1:bbx2, bby1:bby2] = rand_img[:, bbx1:bbx2, bby1:bby2]
+        binary_mask[bbx1:bbx2, bby1:bby2] = rand_binary_mask[bbx1:bbx2, bby1:bby2]
+
+        return img, binary_mask
+
+    def do_cutmix_with_rotation_and_overlay(self, img, binary_mask, rand_img, rand_binary_mask):
+        """Performs CutMix, rotation, and overlays the result on another randomly selected image."""
+
+        # Apply CutMix
+        img, binary_mask = self.do_cutmix(img, binary_mask, rand_img, rand_binary_mask)
+
+        # If img and binary_mask are PyTorch tensors, convert them to CPU and then to PIL images
+        if torch.is_tensor(img):
+            img = TF.to_pil_image(img.cpu())
+        if torch.is_tensor(binary_mask):
+            binary_mask = TF.to_pil_image(binary_mask.cpu().type(torch.uint8))
+
+        # Rotate img and binary_mask
+        img, binary_mask = self.do_rotation(img, binary_mask)
+
+        # Convert img (RGB) to img_rgba (RGBA) and set black pixels to be completely transparent
+        img_rgba = img.convert("RGBA")
+        datas = img_rgba.getdata()
+        new_data = []
+        for item in datas:
+            # change all black (also shades of blacks) pixels to be transparent
+            if item[0] < 10 and item[1] < 10 and item[2] < 10:
+                new_data.append((item[0], item[1], item[2], 0))
+            else:
+                new_data.append(item)
+        img_rgba.putdata(new_data)
+
+        # Convert img_rgba and binary_mask back to tensor
+        img_rgba = TF.to_tensor(img_rgba).float().to(self.device)
+        binary_mask = TF.to_tensor(binary_mask).to(self.device)
+
+        # Select another image randomly and convert it to tensor
+        overlay_img_idx = torch.randint(0, len(self.data), size=(1,)).item()
+        overlay_img_path = self.data[overlay_img_idx]['image_path']
+        overlay_img = Image.open(overlay_img_path).convert('RGB')
+        overlay_img = TF.to_tensor(overlay_img).float().to(self.device)
+
+        # If the overlay image has less than 4 channels, pad the remaining channels
+        if overlay_img.shape[0] < 4:
+            overlay_img = torch.cat([overlay_img, torch.zeros((1, overlay_img.shape[1], overlay_img.shape[2])).to(self.device)])
+
+        # Overlay img_rgba on overlay_img
+        overlay_img = overlay_img * (img_rgba[3:4,:,:] == 0).float() + img_rgba
+
+        # Convert the image back to RGB by dropping the alpha channel
+        overlay_img = overlay_img[:3,:,:]
+
+        return overlay_img, binary_mask
 
     def __getitem__(self, idx, classes=2):
         '''
@@ -168,8 +262,12 @@ class HeronData(Dataset):
 
             rand_img = rand_img.to(self.device)
             rand_binary_mask = torch.from_numpy(rand_binary_mask).to(self.device)
-
-            img, binary_mask = self.do_cutmix(img, binary_mask, rand_img, rand_binary_mask)
+            
+            # regular cutmix
+            img, binary_mask = self.do_cutmix_with_rotation(img, binary_mask, rand_img, rand_binary_mask)
+            
+            # cutmix pro max
+            # img, binary_mask = self.do_cutmix_with_rotation_and_overlay(img, binary_mask, rand_img, rand_binary_mask)
 
         features = {'image': img}
 

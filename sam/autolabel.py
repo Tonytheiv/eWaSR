@@ -147,7 +147,7 @@ class Autolabel:
     # Show the plot
     plt.show()
     
-  def visualizeBinary(self, index, cmpr_height, visualize=True):
+  def visualizeBinary(self, index, cmpr_height, output_dir=None, t=3):
     '''
     heuristic is applied here to find where water is. This can also visualize the label using plt
     '''
@@ -173,16 +173,43 @@ class Autolabel:
     if largest_bottom_touching_mask_id != -1:
         binary_mask = np.where(mask_data[largest_bottom_touching_mask_id]["segmentation"], True, binary_mask)
 
+    # Apply the second heuristic to the binary mask
+    binary_mask = self.fixBottom(binary_mask, t)
+
     # Replace the original masks with the new binary mask
     self.masks[index] = [{"segmentation": binary_mask, "area": largest_bottom_touching_mask_area}]
 
-    if visualize:
-      # Display the binary mask
-      plt.figure(figsize=(20,20))
-      plt.imshow(self.imgs[index])
-      self.showAnns(self.masks[index])
-      plt.axis('off')
+    # Display the binary mask
+    plt.figure(figsize=(20,20))
+    plt.imshow(self.imgs[index])
+    self.showAnns(self.masks[index])
+    plt.axis('off')
+
+    if output_dir:
+      # Create the directory if not exists
+      os.makedirs(output_dir, exist_ok=True)
+      
+      # Save the figure to the output_dir if provided
+      filename = os.path.join(output_dir, f"{str(index)}.jpg")
+      plt.savefig(filename)
+    else:
+      # Show the image
       plt.show()
+    plt.close()
+
+  def fixBottom(self, binary_mask, t):
+    binary_mask_np = np.array(binary_mask)
+
+    # Loop through rows starting from t until 1
+    for i in range(t, 0, -1):
+      target_row = binary_mask_np[-i]
+      
+      for column_index, value in enumerate(target_row):
+        if value == 1:
+          for j in range(i - 1, 0, -1):  # Fill all subsequent rows
+            binary_mask_np[-j, column_index] = 1
+            
+    return binary_mask_np
       
   def outputJsonBinary(self, index):
     '''
