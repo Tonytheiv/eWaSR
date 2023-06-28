@@ -11,19 +11,23 @@ from PIL import Image
 CUTMIX_IMG_PER_IMG = 10
 
 def colorconstant(rgb, alpha=0.29):
-    if rgb.dtype == torch.float32:
-        rgb = rgb.numpy().transpose(1, 2, 0)
-    if rgb.dtype == np.uint8:
-        rgb = rgb.astype(np.float32) / 255.0
-    
-    
+    # check if the input tensor is already on the gpu, if not move it
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    rgb = rgb.to(device)
+
+    # ensure the tensor is of type float32
+    if rgb.dtype != torch.float32:
+        rgb = rgb.float() / 255.0
+
+    # set constants
     beta = 1 - alpha
-    K = 0.003
-    R1 = np.clip(rgb[:, :, 2], K, 1.0) 
-    R2 = np.clip(rgb[:, :, 1], K, 1.0)
-    R3 = np.clip(rgb[:, :, 0], K, 1.0)
+    K = torch.tensor(0.003, device=device)
+    R1 = torch.clamp(rgb[2, :, :], K, 1.0)
+    R2 = torch.clamp(rgb[1, :, :], K, 1.0)
+    R3 = torch.clamp(rgb[0, :, :], K, 1.0)
     
-    F = np.log(R2) -  alpha * np.log(R1) + beta * np.log(R3)
+    F = torch.log(R2) - alpha * torch.log(R1) + beta * torch.log(R3)
+
     return F
 
 class HeronData(Dataset):
@@ -116,6 +120,10 @@ class HeronData(Dataset):
 
         return image, mask
     
+    def adjust_exposure(self, img, exposure_factor):
+        # Adjust exposure
+        return TF.adjust_brightness(img, exposure_factor)
+    
     def do_cutmix(self, img, binary_mask, rand_img, rand_binary_mask):
         # CutMix augmentation
         lam = torch.tensor(np.random.beta(1.0, 1.0)).to(self.device)
@@ -135,9 +143,25 @@ class HeronData(Dataset):
         binary_mask[bbx1:bbx2, bby1:bby2] = rand_binary_mask[bbx1:bbx2, bby1:bby2]
 
         return img, binary_mask
+    
+    def do_cutmix_with_rotation(self, img, binary_mask, rand_img, rand_binary_mask, exposure_factor_range=(0, 0)):
+        # Generate a random exposure factor within the given range
+        exposure_factor = torch.empty(1).uniform_(exposure_factor_range[0], exposure_factor_range[1]).item()
 
-    def do_cutmix_with_rotation(self, img, binary_mask, rand_img, rand_binary_mask):
+        # Adjust exposure of the random image
+        rand_img = self.adjust_exposure(rand_img, 1 + exposure_factor)
+        
         # CutMix augmentation
+        # Ensure both images have the same number of channels
+        if img.shape[0] != rand_img.shape[0]:
+            if img.shape[0] == 4:
+                # Convert rand_img to RGBA
+                rand_img = torch.cat([rand_img, torch.ones((1, rand_img.shape[1], rand_img.shape[2])).to(self.device)], dim=0)
+            else:
+                # Remove the alpha channel from img
+                img = img[:3,:,:]
+
+        # Perform the CutMix operation
         lam = torch.tensor(np.random.beta(1.0, 1.0)).to(self.device)
         cut_rat = torch.sqrt(1. - lam)
         h, w = img.shape[1:]
@@ -150,9 +174,6 @@ class HeronData(Dataset):
         bby1 = torch.clamp(cy - cut_h // 2, 0, h)
         bbx2 = torch.clamp(cx + cut_w // 2, 0, w)
         bby2 = torch.clamp(cy + cut_h // 2, 0, h)
-
-        # Rotate the rand_img and the corresponding rand_binary_mask before mixing
-        rand_img, rand_binary_mask = self.do_rotation(rand_img, rand_binary_mask)
 
         img[:, bbx1:bbx2, bby1:bby2] = rand_img[:, bbx1:bbx2, bby1:bby2]
         binary_mask[bbx1:bbx2, bby1:bby2] = rand_binary_mask[bbx1:bbx2, bby1:bby2]
@@ -239,8 +260,16 @@ class HeronData(Dataset):
         binary_mask = torch.from_numpy(binary_mask).to(self.device)
 
         if self.four_channel_in:
-            Fg = colorconstant(np.array(img.cuda()), alpha=0.29)
-            Fg = torch.from_numpy(Fg).unsqueeze(0).to(self.device)
+            # Convert img to tensor if not and send to GPU
+            if type(img) != torch.Tensor:
+                img = torch.from_numpy(np.array(img)).to(self.device)
+
+            Fg = colorconstant(img, alpha=0.29)
+
+            # Make sure Fg has an extra dimension in the beginning
+            if len(Fg.shape) == 2:
+                Fg = Fg.unsqueeze(0)
+
             img = torch.cat([img, Fg], dim=0)
 
         if cutmix_number > 0:
@@ -264,7 +293,10 @@ class HeronData(Dataset):
             rand_binary_mask = torch.from_numpy(rand_binary_mask).to(self.device)
             
             # regular cutmix
-            img, binary_mask = self.do_cutmix_with_rotation(img, binary_mask, rand_img, rand_binary_mask)
+            # img, binary_mask = self.do_cutmix(img, binary_mask, rand_img, rand_binary_mask)
+            
+            # cutmix pro
+            img, binary_mask = self.do_cutmix_with_rotation(img, binary_mask, rand_img, rand_binary_mask, exposure_factor_range=(-0.1, 0.4))
             
             # cutmix pro max
             # img, binary_mask = self.do_cutmix_with_rotation_and_overlay(img, binary_mask, rand_img, rand_binary_mask)

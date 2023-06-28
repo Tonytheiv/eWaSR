@@ -19,7 +19,7 @@ model_urls = {
     'deeplabv3_resnet101_coco': 'https://download.pytorch.org/models/deeplabv3_resnet101_coco-586e9e4e.pth'
 }
 
-def get_model(model_name, num_classes=3, pretrained=True, **kwargs):
+def get_model(model_name, num_classes=3, pretrained=True, four_channel_in=False, **kwargs):
 
     imu = model_name.endswith('_imu')
     if model_name.startswith('wasr_resnet101'):
@@ -32,7 +32,7 @@ def get_model(model_name, num_classes=3, pretrained=True, **kwargs):
         model = wasr_deeplabv2_resnet18(num_classes=num_classes, imu=imu)
     elif model_name.startswith('ewasr'):
         backbone = model_name.split("_")[1].split("_")[0]
-        model = ewasr(num_classes = num_classes, imu = imu, backbone=backbone, **kwargs)
+        model = ewasr(num_classes = num_classes, imu = imu, backbone=backbone, four_channel_in=four_channel_in, **kwargs)
     else:
         raise ValueError('Unknown model: %s' % model_name)
 
@@ -198,7 +198,7 @@ def wasr_deeplabv2_resnet18(num_classes=3, imu=True):
     return model
 
 
-def ewasr(num_classes, imu, backbone, **kwargs):
+def ewasr(num_classes, imu, backbone, four_channel_in, **kwargs):
 
     if backbone == "resnet18":
         bb = resnet18(pretrained=True)
@@ -209,6 +209,8 @@ def ewasr(num_classes, imu, backbone, **kwargs):
             'layer3': 'aux'
         }
         ch = 512
+        if four_channel_in:
+            bb = augment_resnet_4c(bb)
         bb = IntermediateLayerGetter(bb, return_layers=return_layers)
     else:
         raise ValueError(f"Backbone {backbone} is not supported!")
@@ -227,3 +229,15 @@ def ewasr(num_classes, imu, backbone, **kwargs):
     model = WaSR(bb, decoder, imu=imu)
 
     return model
+
+def augment_resnet_4c(backbone):
+    import copy
+
+    in_plane = backbone.conv1.weight.data.shape[0]
+    conv_4c = nn.Conv2d(4, in_plane, kernel_size=7, stride=2, padding=3, bias=False)
+
+    conv_4c.weight.data[:, :3, :, :] = copy.deepcopy(backbone.conv1.weight.data)
+
+    backbone.conv1 = conv_4c
+
+    return backbone

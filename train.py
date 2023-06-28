@@ -129,10 +129,15 @@ def train_wasr(args):
                             num_workers=args.workers, drop_last=False)
 
     val_dl = None
+    
     if args.validation:
         val_dl = DataLoader(val_ds, batch_size=args.batch_size, num_workers=args.workers)
+    
+    model = models.get_model(args.model, num_classes=args.num_classes, pretrained=args.pretrained, 
+    four_channel_in=args.color_constant)
 
-    model = models.get_model(args.model, num_classes=args.num_classes, pretrained=args.pretrained, mixer=args.mixer, enricher=args.enricher, project=args.project)
+    model = models.get_model(args.model, num_classes=args.num_classes, pretrained=args.pretrained,
+                             four_channel_in=args.color_constant, mixer=args.mixer, enricher=args.enricher, project=args.project)
 
     if args.pretrained_weights is not None:
         print(f"Loading weights from: {args.pretrained_weights}")
@@ -140,6 +145,13 @@ def train_wasr(args):
         for key in list(state_dict.keys()):
             if key.startswith('decoder.aspp.convs') or key.startswith('decoder.seg_head.conv1'):
                 del state_dict[key]
+            if args.color_constant and key.startswith('backbone.conv1'):
+                old_weight = state_dict[key]
+                O, I, H, W = old_weight.shape
+                new_weight = torch.zeros((O, I+1, H, W), dtype=old_weight.dtype, device=old_weight.device)
+                new_weight[:, :-1, :, :] = old_weight
+                state_dict[key] = new_weight
+                
         model.load_state_dict(state_dict, strict=False)
 
     model = LitModel(model, args.num_classes, args)
@@ -153,7 +165,20 @@ def train_wasr(args):
         # Val: Early stopping and best model saving
         if args.patience is not None:
             callbacks.append(EarlyStopping(monitor=args.monitor_metric, patience=args.patience, mode=args.monitor_metric_mode))
-        callbacks.append(ModelCheckpoint(save_last=True, save_top_k=1, monitor=args.monitor_metric, mode=args.monitor_metric_mode))
+        
+        # Set up ModelCheckpoint to save a checkpoint at the end of each epoch
+        callbacks.append(ModelCheckpoint(
+            dirpath='checkpoints',
+            filename='epoch={epoch}-mIoU={val/iou/water:.4f}',
+            save_top_k=-1,  # save all checkpoints
+            verbose=True,
+            monitor='val/iou/water',
+            mode='max',
+            save_last=True,
+            every_n_epochs=1,
+        ))
+
+        
         callbacks.append(LearningRateMonitor(logging_interval='step'))
         callbacks.append(ModelExporter())
 
@@ -170,11 +195,11 @@ def train_wasr(args):
     trainer.test(model, test_dl)
 
 def main():
+    import torch.multiprocessing as mp
+    mp.set_start_method('spawn')
     args = get_arguments()
     print(args)
-
     train_wasr(args)
-
 
 if __name__ == '__main__':
     main()
